@@ -1,0 +1,11 @@
+# macOS
+.DS_Store
+**/.DS_Store
+
+# VS Code
+.vscode/
+**/.vscode/
+
+# Optional: local environment files
+.env
+*.log
