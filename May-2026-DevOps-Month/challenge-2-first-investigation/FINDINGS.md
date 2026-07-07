@@ -6,11 +6,13 @@ The Lambda function challenge2-broken-fn failed on every invocation because the 
 ## Fix applied
 I defined the config variable before using it in the handler.
 
-```config = {"value": "hello"}
+```code
+config = {"value": "hello"}
 def handler(event, context):
     # This function is broken on purpose. Use the DevOps Agent to
     # find out why every invocation fails.
-    return {"result": config["value"]}```
+    return {"result": config["value"]}
+```
 
 After deploying the change and testing the function again, the Lambda executed successfully and the challenge2-broken-fn-errors CloudWatch alarm returned to the OK state.
 
