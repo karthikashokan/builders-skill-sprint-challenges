@@ -1,0 +1,213 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Challenge 5 - Banking API with RDS Security Group outage
+
+Parameters:
+  DBPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 8
+    Description: PostgreSQL master password
+
+Resources:
+
+  ############################################################
+  # Security Groups
+  ############################################################
+
+  LambdaSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Lambda Security Group
+      VpcId: vpc-0aa3195afad3ded14
+
+  RDSSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: PostgreSQL Security Group
+      VpcId: vpc-0aa3195afad3ded14
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId: !Ref LambdaSG
+
+  ############################################################
+  # DB Subnet Group
+  ############################################################
+
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Challenge 5 DB subnet group
+      SubnetIds:
+        - subnet-0b339ac95a64a53f5
+        - subnet-0f862a99224703f61
+
+  ############################################################
+  # PostgreSQL
+  ############################################################
+
+  PostgreSQL:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceIdentifier: challenge5-postgres
+      Engine: postgres
+      EngineVersion: "16.14"
+      DBInstanceClass: db.t3.micro
+      AllocatedStorage: 20
+      StorageType: gp3
+      MasterUsername: postgres
+      MasterUserPassword: !Ref DBPassword
+      PubliclyAccessible: true
+      BackupRetentionPeriod: 0
+      MultiAZ: false
+      DeletionProtection: false
+      VPCSecurityGroups:
+        - !Ref RDSSG
+      DBSubnetGroupName: !Ref DBSubnetGroup
+
+  ############################################################
+  # IAM Role
+  ############################################################
+
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+
+  ############################################################
+  # Lambda Function
+  ############################################################
+
+  BankingFn:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: challenge5-bank-api
+      Runtime: python3.12
+      Handler: index.handler
+      Timeout: 15
+      Role: !GetAtt LambdaRole.Arn
+
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref LambdaSG
+        SubnetIds:
+          - subnet-0b339ac95a64a53f5
+          - subnet-0f862a99224703f61
+
+      Environment:
+        Variables:
+          DB_HOST: !GetAtt PostgreSQL.Endpoint.Address
+
+      Code:
+        ZipFile: |
+          import os
+          import socket
+          import json
+
+          def handler(event, context):
+              host = os.environ["DB_HOST"]
+
+              try:
+                  s = socket.create_connection(
+                      (host, 5432),
+                      timeout=5
+                  )
+                  s.close()
+
+                  return {
+                      "statusCode": 200,
+                      "body": json.dumps({
+                          "status": "database reachable",
+                          "host": host
+                      })
+                  }
+
+              except Exception as e:
+                  raise Exception(
+                      f"Database connectivity failed: {str(e)}"
+                  )
+
+  ############################################################
+  # API Gateway
+  ############################################################
+
+  HttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: challenge5-bank-api
+      ProtocolType: HTTP
+
+  Integration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt BankingFn.Arn
+      PayloadFormatVersion: "2.0"
+
+  Route:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /health
+      Target: !Sub integrations/${Integration}
+
+  Stage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref HttpApi
+      StageName: prod
+      AutoDeploy: true
+
+  LambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref BankingFn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/*
+
+  ############################################################
+  # Alarm
+  ############################################################
+
+  LambdaErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: challenge5-bank-api-errors
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref BankingFn
+
+Outputs:
+  ApiUrl:
+    Value: !Sub https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/prod/health
+
+  RdsEndpoint:
+    Value: !GetAtt PostgreSQL.Endpoint.Address
+
+  RdsSecurityGroup:
+    Value: !Ref RDSSG
+
+  LambdaSecurityGroup:
+    Value: !Ref LambdaSG
